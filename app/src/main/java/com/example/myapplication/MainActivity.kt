@@ -2,8 +2,13 @@ package com.example.myapplication
 
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.text.Spannable
+import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.animation.AlphaAnimation
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -18,9 +23,8 @@ import io.noties.markwon.html.HtmlPlugin
 import io.noties.markwon.image.ImagesPlugin
 import io.noties.markwon.image.coil.CoilImagesPlugin
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 
 class MainActivity : AppCompatActivity() {
 
@@ -30,6 +34,9 @@ class MainActivity : AppCompatActivity() {
 
     private val buffer = StringBuilder()
     private var tempBuffer = ""
+
+    // 渲染任务队列
+    private val renderQueue = Channel<String>(Channel.UNLIMITED)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,6 +56,7 @@ class MainActivity : AppCompatActivity() {
             .build()
 
         startStreaming()
+        startRendering()
     }
 
     private fun startStreaming() {
@@ -62,8 +70,16 @@ class MainActivity : AppCompatActivity() {
                 val blockData = extractRenderableBlock(tempBuffer)
                 if (blockData != null) {
                     tempBuffer = tempBuffer.substring(blockData.lengthUsed)
-                    renderBlock(blockData.content)
+                    renderQueue.send(blockData.content)
                 }
+            }
+        }
+    }
+
+    private fun startRendering() {
+        lifecycleScope.launch {
+            for (block in renderQueue) {
+                renderBlock(block)
             }
         }
     }
@@ -73,20 +89,17 @@ class MainActivity : AppCompatActivity() {
     private fun extractRenderableBlock(text: String): MarkdownBlock? {
         val trimmed = text.trimStart()
 
-        // ✅ 优先：完整段落（两个换行）
         val paragraphEnd = trimmed.indexOf("\n\n")
         if (paragraphEnd != -1) {
             return MarkdownBlock(trimmed.substring(0, paragraphEnd + 2), paragraphEnd + 2)
         }
 
-        // ✅ 图片：![alt](url)
         val imageRegex = Regex("""!\[.*?]\(.*?\)""")
         val imageMatch = imageRegex.find(trimmed)
         if (imageMatch != null) {
             return MarkdownBlock(imageMatch.value, imageMatch.range.last + 1)
         }
 
-        // ✅ 块级数学公式：必须是 $$ 成对闭合
         val blockStart = trimmed.indexOf("$$")
         if (blockStart != -1) {
             val blockEnd = trimmed.indexOf("$$", blockStart + 2)
@@ -94,18 +107,16 @@ class MainActivity : AppCompatActivity() {
                 val mathBlock = trimmed.substring(blockStart, blockEnd + 2)
                 return MarkdownBlock(mathBlock, blockEnd + 2)
             } else {
-                return null // 不完整，不渲染
+                return null
             }
         }
 
-        // ✅ 行级数学公式：只有整句话结尾才渲染
         val inlineMathWithSentence = Regex("""(?<!\$)\$(.+?)\$(?!\$)[^。！？.\n]*[。！？.]?\s*\n""")
         val inlineMatch = inlineMathWithSentence.find(trimmed)
         if (inlineMatch != null) {
             return MarkdownBlock(inlineMatch.value, inlineMatch.range.last + 1)
         }
 
-        // ✅ 表格：至少包含 | 和 ---，并以空行结尾
         if (trimmed.contains("|") && trimmed.contains("\n---")) {
             val tableEnd = trimmed.indexOf("\n\n", trimmed.indexOf("\n---"))
             if (tableEnd != -1) {
@@ -113,15 +124,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        return null // 暂时没有可渲染的块
+        return null
     }
 
     private fun preprocessMarkdown(input: String): String {
-        var result = input.trim()
-        result = result.replace(Regex("""(?<!\$)\$(.+?)\$(?!\$)""")) { match ->
+        val result = input.trim()
+        // 将标准行内 $...$ 替换为 Markwon 需要的 $$...$$（行内，无换行）
+        return result.replace(Regex("""(?<!\$)\$(.+?)\$(?!\$)""")) { match ->
             "$$${match.groupValues[1]}$$"
         }
-        return result
     }
 
     private suspend fun renderBlock(block: String) {
@@ -136,17 +147,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         withContext(Dispatchers.Main) {
-            // 创建包裹容器，设置 padding
             val container = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
                 )
-                setPadding(16, 16, 16, 16)
+                setPadding(24, 24, 24, 24)
             }
 
-            // 创建用于显示内容的 TextView
             val view = TextView(this@MainActivity).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -155,23 +164,66 @@ class MainActivity : AppCompatActivity() {
                     setMargins(0, 12, 0, 12)
                 }
                 textSize = 16f
+                setTextColor(Color.BLACK)
             }
 
-            // 判断是否为块级公式，设置居中样式
             if (block.trim().startsWith("$$")) {
                 view.gravity = Gravity.CENTER
-                view.setTextColor(Color.BLACK)
-                view.setBackgroundColor(Color.parseColor("#F6F6F6"))
             }
-
-            markwon.setParsedMarkdown(view, rendered)
 
             container.addView(view)
             contentContainer.addView(container)
+
+            val isPlainText = !block.contains("$$") &&
+                    !block.contains("![") &&
+                    !block.contains("|") &&
+                    !block.contains("\\begin") &&
+                    !block.contains("<img")
+
+            if (isPlainText) {
+                val spannable = rendered as? Spannable
+                if (spannable != null) {
+                    val deferred = CompletableDeferred<Unit>()
+                    animateTyping(view, spannable) {
+                        deferred.complete(Unit)
+                    }
+                    deferred.await() // 等待动画完成再处理下一个 block
+                } else {
+                    markwon.setParsedMarkdown(view, rendered)
+                }
+            } else {
+                markwon.setParsedMarkdown(view, rendered)
+            }
+
+            if (!isPlainText) {
+                val fadeIn = AlphaAnimation(0f, 1f).apply {
+                    duration = 300
+                    fillAfter = true
+                }
+                container.startAnimation(fadeIn)
+            }
 
             scrollView.post {
                 scrollView.fullScroll(ScrollView.FOCUS_DOWN)
             }
         }
+    }
+
+    private fun animateTyping(view: TextView, fullText: CharSequence, onComplete: () -> Unit) {
+        val handler = Handler(Looper.getMainLooper())
+        var index = 0
+        val delay = 20L
+
+        handler.post(object : Runnable {
+            override fun run() {
+                if (index <= fullText.length) {
+                    view.text = fullText.subSequence(0, index)
+                    index++
+                    handler.postDelayed(this, delay)
+                } else {
+                    onComplete()
+                }
+            }
+        })
     }
 }
