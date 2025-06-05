@@ -60,7 +60,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startStreaming() {
-        val prompt = "返回一个包含数学公式（行级和块级，复杂的，多个）、图片、表格内容，图片链接是：https://tse2.mm.bing.net/th/id/OIP.C6DF0hkbhkgRdoOpjfb-9gHaHa?rs=1&pid=ImgDetMain"
+        val prompt = "返回一个包含数学公式（行级，复杂的，多个）、图片、表格内容，图片链接是：https://tse2.mm.bing.net/th/id/OIP.C6DF0hkbhkgRdoOpjfb-9gHaHa?rs=1&pid=ImgDetMain"
 
         lifecycleScope.launch {
             streamQwenResponse(prompt).collect { delta ->
@@ -99,15 +99,20 @@ class MainActivity : AppCompatActivity() {
         if (imageMatch != null) {
             return MarkdownBlock(imageMatch.value, imageMatch.range.last + 1)
         }
-
         val blockStart = trimmed.indexOf("$$")
         if (blockStart != -1) {
             val blockEnd = trimmed.indexOf("$$", blockStart + 2)
             if (blockEnd != -1) {
                 val mathBlock = trimmed.substring(blockStart, blockEnd + 2)
-                return MarkdownBlock(mathBlock, blockEnd + 2)
-            } else {
-                return null
+
+                // 检查是否为单独一行（前后是换行或开始/结尾）
+                val before = trimmed.substring(0, blockStart)
+                val after = trimmed.substring(blockEnd + 2)
+
+                val isStandalone = before.endsWith("\n") && after.startsWith("\n")
+                if (isStandalone) {
+                    return MarkdownBlock(mathBlock, blockEnd + 2)
+                }
             }
         }
 
@@ -129,6 +134,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun preprocessMarkdown(input: String): String {
         val result = input.trim()
+        Log.d("替换前", result)
         // 将标准行内 $...$ 替换为 Markwon 需要的 $$...$$（行内，无换行）
         return result.replace(Regex("""(?<!\$)\$(.+?)\$(?!\$)""")) { match ->
             "$$${match.groupValues[1]}$$"
@@ -137,6 +143,7 @@ class MainActivity : AppCompatActivity() {
 
     private suspend fun renderBlock(block: String) {
         val cleaned = preprocessMarkdown(block)
+        Log.d("替换后", cleaned)
 
         val node = withContext(Dispatchers.Default) {
             markwon.parse(cleaned)
