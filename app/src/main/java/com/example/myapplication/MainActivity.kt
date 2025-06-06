@@ -60,7 +60,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startStreaming() {
-        val prompt = "返回一个包含数学公式（行级，复杂的，多个）、图片、表格内容，图片链接是：https://tse2.mm.bing.net/th/id/OIP.C6DF0hkbhkgRdoOpjfb-9gHaHa?rs=1&pid=ImgDetMain"
+        val prompt = "返回一个包含数学公式（输出多个复杂的行级和块级公式）、图片、表格内容，图片链接是：https://tse2.mm.bing.net/th/id/OIP.C6DF0hkbhkgRdoOpjfb-9gHaHa?rs=1&pid=ImgDetMain"
+//        val prompt = "显示出完整的markdown格式"
 
         lifecycleScope.launch {
             streamQwenResponse(prompt).collect { delta ->
@@ -96,23 +97,18 @@ class MainActivity : AppCompatActivity() {
 
         val imageRegex = Regex("""!\[.*?]\(.*?\)""")
         val imageMatch = imageRegex.find(trimmed)
-        if (imageMatch != null) {
+        if (imageMatch != null) {                                                                                                                            
             return MarkdownBlock(imageMatch.value, imageMatch.range.last + 1)
         }
+
         val blockStart = trimmed.indexOf("$$")
         if (blockStart != -1) {
             val blockEnd = trimmed.indexOf("$$", blockStart + 2)
             if (blockEnd != -1) {
                 val mathBlock = trimmed.substring(blockStart, blockEnd + 2)
-
-                // 检查是否为单独一行（前后是换行或开始/结尾）
-                val before = trimmed.substring(0, blockStart)
-                val after = trimmed.substring(blockEnd + 2)
-
-                val isStandalone = before.endsWith("\n") && after.startsWith("\n")
-                if (isStandalone) {
-                    return MarkdownBlock(mathBlock, blockEnd + 2)
-                }
+                return MarkdownBlock(mathBlock, blockEnd + 2)
+            } else {
+                return null
             }
         }
 
@@ -128,30 +124,23 @@ class MainActivity : AppCompatActivity() {
                 return MarkdownBlock(trimmed.substring(0, tableEnd + 2), tableEnd + 2)
             }
         }
-
         return null
     }
 
     private fun preprocessMarkdown(input: String): String {
         val result = input.trim()
-        Log.d("替换前", result)
+//        Log.d("替换前", result)
         // 将标准行内 $...$ 替换为 Markwon 需要的 $$...$$（行内，无换行）
-        return result.replace(Regex("""(?<!\$)\$(.+?)\$(?!\$)""")) { match ->
+        val inlineMathRegex = Regex("""(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)""")
+        return result.replace(inlineMathRegex) { match ->
             "$$${match.groupValues[1]}$$"
         }
     }
 
+
     private suspend fun renderBlock(block: String) {
         val cleaned = preprocessMarkdown(block)
-        Log.d("替换后", cleaned)
-
-        val node = withContext(Dispatchers.Default) {
-            markwon.parse(cleaned)
-        }
-
-        val rendered = withContext(Dispatchers.Default) {
-            markwon.render(node)
-        }
+//        Log.d("替换后", cleaned)
 
         withContext(Dispatchers.Main) {
             val container = LinearLayout(this@MainActivity).apply {
@@ -163,6 +152,8 @@ class MainActivity : AppCompatActivity() {
                 setPadding(24, 24, 24, 24)
             }
 
+            val hasLatexDrawable = cleaned.contains("$$")
+
             val view = TextView(this@MainActivity).apply {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -172,8 +163,16 @@ class MainActivity : AppCompatActivity() {
                 }
                 textSize = 16f
                 setTextColor(Color.BLACK)
+                setLineSpacing(0f, 1.5f)
+                includeFontPadding = true
+
+                // 补救式解决：如果可能含有公式，给上下 padding 多一点
+                if (hasLatexDrawable) {
+                    setPadding(0, 5, 0, 12)
+                }
             }
 
+            // 如果以块级公式开头则居中
             if (block.trim().startsWith("$$")) {
                 view.gravity = Gravity.CENTER
             }
@@ -181,28 +180,31 @@ class MainActivity : AppCompatActivity() {
             container.addView(view)
             contentContainer.addView(container)
 
-            val isPlainText = !block.contains("$$") &&
-                    !block.contains("![") &&
-                    !block.contains("|") &&
-                    !block.contains("\\begin") &&
-                    !block.contains("<img")
+            // 判断是否是纯文本（不含公式、图片、表格）
+            val containsMath = cleaned.contains("$$")
+            val containsImage = cleaned.contains("![") || cleaned.contains("<img")
+            val containsTable = cleaned.contains("|") && cleaned.contains("---")
+            val containsHtmlBlock = cleaned.contains("\\begin")
+
+            val isPlainText = !containsMath && !containsImage && !containsTable && !containsHtmlBlock
 
             if (isPlainText) {
+                val node = withContext(Dispatchers.Default) { markwon.parse(cleaned) }
+                val rendered = withContext(Dispatchers.Default) { markwon.render(node) }
+
                 val spannable = rendered as? Spannable
                 if (spannable != null) {
                     val deferred = CompletableDeferred<Unit>()
-                    animateTyping(view, spannable) {
-                        deferred.complete(Unit)
-                    }
-                    deferred.await() // 等待动画完成再处理下一个 block
+                    animateTyping(view, spannable) { deferred.complete(Unit) }
+                    deferred.await()
                 } else {
-                    markwon.setParsedMarkdown(view, rendered)
+                    markwon.setMarkdown(view, cleaned)
                 }
             } else {
-                markwon.setParsedMarkdown(view, rendered)
-            }
+                // 富文本直接渲染（数学/图片/表格等）
+                markwon.setMarkdown(view, cleaned)
 
-            if (!isPlainText) {
+                // 淡入动画
                 val fadeIn = AlphaAnimation(0f, 1f).apply {
                     duration = 300
                     fillAfter = true
